@@ -4,23 +4,28 @@ import { Client } from 'pg';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import axios from 'axios'
+import 'dotenv/config'; // Add this to the very top of your file
+
+const dbClient = new Client({
+    connectionString: process.env.DATABASE_URL,
+    ssl: {
+        rejectUnauthorized: false // This line forces Node to trust the Neon certificate
+    }
+});
+
+dbClient.connect()
+    .then(() => console.log('✅ Successfully connected to Neon PostgreSQL!'))
+    .catch(err => console.error('❌ Database connection error:', err.stack));
 
 const app = express();
 app.use(cors());
 app.use(express.json()); // CRITICAL: Allows Express to read req.body
 
-const dbClient = new Client({
-    user: 'postgres',           
-    host: 'localhost',
-    database: 'hirequb',        
-    password: 'Jacob@35', 
-    port: 5432,
-});
 
-dbClient.connect();
+
 
 // Replace this with a strong, hidden environment variable in production
-const JWT_SECRET = 'super_secret_hirequb_key_2026'; 
+
 
 // SIGNUP ROUTE
 app.post('/api/signup', async (req, res) => {
@@ -74,7 +79,7 @@ app.post('/api/login', async (req, res) => {
 
         // 3. Generate a new JWT token
         // Inside your app.post('/api/login') route
-        const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '7d' });
+        const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
         res.json({ 
             user: { 
@@ -211,7 +216,7 @@ app.post('/api/user/cancel', authenticateToken, async (req, res) => {
         if (userResult.rows.length === 0) return res.status(404).json({ error: 'User not found' });
         const email = userResult.rows[0].email;
 
-        const flwSecret = 'FLWSECK_TEST-f0b580a9c343d8cf70f1767e582318bc-X'; 
+        const flwSecret = process.env.FLWSEC_KEY; 
         
         const subResponse = await axios.get(`https://api.flutterwave.com/v3/subscriptions?email=${email}`, {
             headers: { 'Authorization': `Bearer ${flwSecret}` }
