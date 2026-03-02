@@ -3,13 +3,13 @@ import cors from 'cors';
 import { Client } from 'pg';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
-import axios from 'axios';
-import 'dotenv/config'; 
+import axios from 'axios'
+import 'dotenv/config'; // Add this to the very top of your file
 
 const dbClient = new Client({
     connectionString: process.env.DATABASE_URL,
     ssl: {
-        rejectUnauthorized: false 
+        rejectUnauthorized: false // This line forces Node to trust the Neon certificate
     }
 });
 
@@ -19,26 +19,36 @@ dbClient.connect()
 
 const app = express();
 app.use(cors());
-app.use(express.json()); 
+app.use(express.json()); // CRITICAL: Allows Express to read req.body
 
-const JWT_SECRET = process.env.JWT_SECRET;
+
+
+
+// Replace this with a strong, hidden environment variable in production
+
 
 // SIGNUP ROUTE
 app.post('/api/signup', async (req, res) => {
     try {
         const { email, password } = req.body;
+
+        // 1. Hash the password (salt rounds = 10)
         const hashedPassword = await bcrypt.hash(password, 10);
 
+        // 2. Save the user to the database
         const result = await dbClient.query(
-            'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email, is_premium, free_applies',
+            'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email',
             [email, hashedPassword]
         );
 
         const newUser = result.rows[0];
-        const token = jwt.sign({ userId: newUser.id }, JWT_SECRET, { expiresIn: '7d' });
+
+        // 3. Create a JWT token so they are instantly logged in
+        const token = jwt.sign({ userId: newUser.id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
         res.status(201).json({ user: newUser, token });
     } catch (err) {
+        // Error code 23505 means unique violation (email already exists)
         if (err.code === '23505') {
             res.status(400).json({ error: 'Email already in use.' });
         } else {
@@ -51,6 +61,8 @@ app.post('/api/signup', async (req, res) => {
 app.post('/api/login', async (req, res) => {
     try {
         const { email, password } = req.body;
+
+        // 1. Find the user by email
         const result = await dbClient.query('SELECT * FROM users WHERE email = $1', [email]);
         const user = result.rows[0];
 
@@ -58,20 +70,23 @@ app.post('/api/login', async (req, res) => {
             return res.status(401).json({ error: 'Invalid email or password.' });
         }
 
+        // 2. Compare the typed password with the hashed password in the DB
         const isMatch = await bcrypt.compare(password, user.password_hash);
 
         if (!isMatch) {
             return res.status(401).json({ error: 'Invalid email or password.' });
         }
 
-        const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '7d' });
+        // 3. Generate a new JWT token
+        // Inside your app.post('/api/login') route
+        const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
         res.json({ 
             user: { 
                 id: user.id, 
                 email: user.email, 
                 is_premium: user.is_premium,
-                free_applies: user.free_applies 
+                free_applies: user.free_applies // ADD THIS LINE
             }, 
             token 
         });
@@ -80,21 +95,21 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-// MIDDLEWARE
+// MIDDLEWARE: We will use this in the next step to protect the "Mark as Applied" route
 const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1]; 
+    const token = authHeader && authHeader.split(' ')[1]; // Format: "Bearer <token>"
 
     if (!token) return res.status(401).json({ error: 'Access denied. No token provided.' });
 
     jwt.verify(token, JWT_SECRET, (err, user) => {
         if (err) return res.status(403).json({ error: 'Invalid token.' });
-        req.user = user; 
+        req.user = user; // Attach the user ID to the request
         next();
     });
 };
 
-// GET JOBS (Secure Feed - No apply links sent)
+// ... (Keep your existing GET /api/jobs route down here) ...
 app.get('/api/jobs', async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;
@@ -105,18 +120,20 @@ app.get('/api/jobs', async (req, res) => {
         const locationQuery = req.query.location || '';
         const departmentQuery = req.query.department || '';
 
+        // 1. Check if the user is logged in by looking for a token
         let userId = null;
         const authHeader = req.headers['authorization'];
         if (authHeader) {
             const token = authHeader.split(' ')[1];
             try {
-                const decoded = jwt.verify(token, process.env.JWT_SECRET); 
+                const decoded = jwt.verify(token, JWT_SECRET); // Must match your secret
                 userId = decoded.userId;
             } catch (e) {
                 // Ignore expired/invalid tokens and just show the public feed
             }
         }
 
+        // 2. Build the query. If userId exists, add the exclusion subquery.
         let query = `
             SELECT * FROM jobs 
             WHERE title ILIKE $1 
@@ -133,65 +150,37 @@ app.get('/api/jobs', async (req, res) => {
 
         query += ` ORDER BY updated_at DESC LIMIT $4 OFFSET $5;`;
         
+        // Update the final res.json() response at the bottom of your /api/login route
         const result = await dbClient.query(query, queryParams);
-        res.json(result.rows); 
+        res.json(result.rows); // Make sure it looks exactly like this
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// SECURE APPLY GATEKEEPER
-app.get('/api/jobs/:id/apply', authenticateToken, async (req, res) => {
+// NEW: Route to mark a job as applied
+app.post('/api/jobs/apply', authenticateToken, async (req, res) => {
     try {
-        const userId = req.user.userId;
-        const jobId = req.params.id;
+        const userId = req.user.userId; // Extracted from the verified JWT
+        const { jobId } = req.body;
 
-        // 1. Fetch user status
-        const userQuery = await dbClient.query('SELECT is_premium, free_applies FROM users WHERE id = $1', [userId]);
-        const user = userQuery.rows[0];
-
-        if (!user) return res.status(404).json({ error: 'User not found.' });
-
-        // 2. Block if free applies are empty and they aren't premium
-        if (!user.is_premium && user.free_applies <= 0) {
-            return res.status(403).json({ 
-                error: 'Premium required', 
-                message: 'You have used all your free applies. Please upgrade to Premium.' 
-            });
-        }
-
-        // 3. Fetch the secure apply link
-        const jobQuery = await dbClient.query('SELECT apply_url FROM jobs WHERE id = $1', [jobId]);
-        const job = jobQuery.rows[0];
-
-        if (!job) return res.status(404).json({ error: 'Job not found.' });
-
-        // 4. Deduct a free apply if they are not premium
-        if (!user.is_premium) {
-            await dbClient.query('UPDATE users SET free_applies = free_applies - 1 WHERE id = $1', [userId]);
-        }
-
-        // 5. Automatically log the job as applied
         await dbClient.query(
             'INSERT INTO applied_jobs (user_id, job_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
             [userId, jobId]
         );
 
-        // 6. Return the secure link to the frontend
-        res.json({ apply_url: job.apply_url });
-
+        res.json({ success: true, message: 'Job marked as applied.' });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// GET APPLIED JOBS
 app.get('/api/jobs/applied', authenticateToken, async (req, res) => {
     try {
         const userId = req.user.userId;
         
         const query = `
-            SELECT jobs.id, jobs.company_token, jobs.title, jobs.location, jobs.department, applied_jobs.applied_at 
+            SELECT jobs.*, applied_jobs.applied_at 
             FROM jobs 
             INNER JOIN applied_jobs ON jobs.id = applied_jobs.job_id 
             WHERE applied_jobs.user_id = $1 
@@ -205,18 +194,20 @@ app.get('/api/jobs/applied', authenticateToken, async (req, res) => {
     }
 });
 
-// UPGRADE TO PREMIUM
+// Add this above your app.listen line
 app.post('/api/user/upgrade', authenticateToken, async (req, res) => {
     try {
         const userId = req.user.userId;
+        
+        // In a production environment, you would also verify the Flutterwave transaction ID here
         await dbClient.query('UPDATE users SET is_premium = TRUE WHERE id = $1', [userId]);
+        
         res.json({ success: true, message: 'Account upgraded to premium.' });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// CANCEL PREMIUM
 app.post('/api/user/cancel', authenticateToken, async (req, res) => {
     try {
         const userId = req.user.userId;
@@ -242,9 +233,28 @@ app.post('/api/user/cancel', authenticateToken, async (req, res) => {
         }
 
         await dbClient.query('UPDATE users SET is_premium = FALSE WHERE id = $1', [userId]);
+        
         res.json({ success: true, message: 'Subscription successfully cancelled.' });
     } catch (err) {
+        console.error('Cancellation error:', err.response ? err.response.data : err.message);
         res.status(500).json({ error: 'Failed to cancel subscription.' });
+    }
+});
+app.post('/api/user/use-free-apply', authenticateToken, async (req, res) => {
+    try {
+        const userId = req.user.userId;
+        const result = await dbClient.query(
+            'UPDATE users SET free_applies = free_applies - 1 WHERE id = $1 AND free_applies > 0 RETURNING free_applies',
+            [userId]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(403).json({ error: 'No free applies left' });
+        }
+        
+        res.json({ success: true, free_applies: result.rows[0].free_applies });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
 });
 
