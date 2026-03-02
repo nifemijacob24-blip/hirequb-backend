@@ -110,17 +110,15 @@ app.get('/api/jobs', async (req, res) => {
         if (authHeader) {
             const token = authHeader.split(' ')[1];
             try {
-                const decoded = jwt.verify(token, JWT_SECRET); 
+                const decoded = jwt.verify(token, process.env.JWT_SECRET); 
                 userId = decoded.userId;
             } catch (e) {
-                // Ignore invalid tokens for public feed
+                // Ignore expired/invalid tokens and just show the public feed
             }
         }
 
-        // We explicitly define columns here to exclude apply_url
         let query = `
-            SELECT id, company_token, greenhouse_id, title, location, department, updated_at, description_html 
-            FROM jobs 
+            SELECT * FROM jobs 
             WHERE title ILIKE $1 
               AND location ILIKE $2 
               AND department ILIKE $3
