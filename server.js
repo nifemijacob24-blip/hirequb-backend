@@ -44,7 +44,7 @@ app.post('/api/signup', async (req, res) => {
         const newUser = result.rows[0];
 
         // 3. Create a JWT token so they are instantly logged in
-        const token = jwt.sign({ userId: newUser.id }, JWT_SECRET, { expiresIn: '7d' });
+        const token = jwt.sign({ userId: newUser.id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
         res.status(201).json({ user: newUser, token });
     } catch (err) {
