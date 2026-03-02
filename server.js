@@ -159,17 +159,32 @@ app.get('/api/jobs', async (req, res) => {
 });
 
 // NEW: Route to mark a job as applied
+// NEW: Route to mark a job as applied AND deduct the credit
 app.post('/api/jobs/apply', authenticateToken, async (req, res) => {
     try {
-        const userId = req.user.userId; // Extracted from the verified JWT
+        const userId = req.user.userId; 
         const { jobId } = req.body;
 
+        // 1. Check if the user has free applies left
+        const userRes = await dbClient.query('SELECT is_premium, free_applies FROM users WHERE id = $1', [userId]);
+        const user = userRes.rows[0];
+
+        if (!user.is_premium && user.free_applies <= 0) {
+            return res.status(403).json({ error: 'Out of free applies. Upgrade to Premium.' });
+        }
+
+        // 2. Mark the job as applied
         await dbClient.query(
             'INSERT INTO applied_jobs (user_id, job_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
             [userId, jobId]
         );
 
-        res.json({ success: true, message: 'Job marked as applied.' });
+        // 3. Deduct the credit (only if they aren't premium)
+        if (!user.is_premium) {
+            await dbClient.query('UPDATE users SET free_applies = free_applies - 1 WHERE id = $1', [userId]);
+        }
+
+        res.json({ success: true, message: 'Job marked as applied and credit deducted.' });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
