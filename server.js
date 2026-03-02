@@ -160,6 +160,36 @@ app.get('/api/jobs', async (req, res) => {
     }
 });
 
+app.get('/api/jobs/category/:slug', async (req, res) => {
+    try {
+        const slug = req.params.slug;
+        const page = parseInt(req.query.page) || 1;
+        const limit = 50; 
+        const offset = (page - 1) * limit;
+
+        const deptQuery = await dbClient.query('SELECT DISTINCT department FROM jobs WHERE department IS NOT NULL');
+        const match = deptQuery.rows.find(row => 
+            row.department.toLowerCase().replace(/[^a-z0-9]+/g, '-') === slug
+        );
+
+        if (!match) {
+            return res.status(404).json({ error: 'Category not found' });
+        }
+
+        const query = `
+            SELECT * FROM jobs 
+            WHERE department = $1 
+            ORDER BY updated_at DESC 
+            LIMIT $2 OFFSET $3;
+        `;
+        
+        const result = await dbClient.query(query, [match.department, limit, offset]);
+        res.json(result.rows); 
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // NEW: Route to mark a job as applied
 // NEW: Route to mark a job as applied AND deduct the credit
 app.post('/api/jobs/apply', authenticateToken, async (req, res) => {
@@ -278,6 +308,58 @@ app.post('/api/user/use-free-apply', authenticateToken, async (req, res) => {
         res.json({ success: true, free_applies: result.rows[0].free_applies });
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/sitemap.xml', async (req, res) => {
+    try {
+        const deptQuery = await dbClient.query('SELECT DISTINCT department FROM jobs WHERE department IS NOT NULL');
+        const departments = deptQuery.rows.map(row => {
+            return {
+                original: row.department,
+                slug: row.department.toLowerCase().replace(/[^a-z0-9]+/g, '-')
+            };
+        });
+
+        const jobsQuery = await dbClient.query('SELECT id, updated_at FROM jobs ORDER BY updated_at DESC LIMIT 1000');
+
+        let xml = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+        <loc>https://hirequb.com</loc>
+        <changefreq>daily</changefreq>
+        <priority>1.0</priority>
+    </url>`;
+
+        for (const dept of departments) {
+            if (dept.slug) {
+                xml += `
+    <url>
+        <loc>https://hirequb.com/category/${dept.slug}</loc>
+        <changefreq>daily</changefreq>
+        <priority>0.8</priority>
+    </url>`;
+            }
+        }
+
+        for (const job of jobsQuery.rows) {
+            const date = new Date(job.updated_at).toISOString().split('T')[0];
+            xml += `
+    <url>
+        <loc>https://hirequb.com/job/${job.id}</loc>
+        <lastmod>${date}</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+    </url>`;
+        }
+
+        xml += `\n</urlset>`;
+
+        res.header('Content-Type', 'application/xml');
+        res.send(xml);
+    } catch (err) {
+        console.error('Sitemap error:', err.message);
+        res.status(500).send('Error generating sitemap');
     }
 });
 
