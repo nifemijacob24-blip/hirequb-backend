@@ -162,30 +162,36 @@ app.get('/api/jobs', async (req, res) => {
 // NEW: Route to mark a job as applied AND deduct the credit
 app.post('/api/jobs/apply', authenticateToken, async (req, res) => {
     try {
-        const userId = req.user.userId; 
+        const userId = req.user.userId;
         const { jobId } = req.body;
 
-        // 1. Check if the user has free applies left
+        console.log(`Incoming apply request from User ID: ${userId} for Job ID: ${jobId}`);
+
         const userRes = await dbClient.query('SELECT is_premium, free_applies FROM users WHERE id = $1', [userId]);
         const user = userRes.rows[0];
 
+        console.log(`Current free applies before deduction: ${user.free_applies}`);
+
         if (!user.is_premium && user.free_applies <= 0) {
+            console.log(`User ${userId} blocked. Out of free applies.`);
             return res.status(403).json({ error: 'Out of free applies. Upgrade to Premium.' });
         }
 
-        // 2. Mark the job as applied
         await dbClient.query(
             'INSERT INTO applied_jobs (user_id, job_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
             [userId, jobId]
         );
 
-        // 3. Deduct the credit (only if they aren't premium)
         if (!user.is_premium) {
             await dbClient.query('UPDATE users SET free_applies = free_applies - 1 WHERE id = $1', [userId]);
+            console.log(`Successfully deducted 1 free apply from User ID: ${userId}`);
+        } else {
+            console.log(`User ID: ${userId} is premium, no deduction made.`);
         }
 
         res.json({ success: true, message: 'Job marked as applied and credit deducted.' });
     } catch (err) {
+        console.error('Apply Route Error:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
