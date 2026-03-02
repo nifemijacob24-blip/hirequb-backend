@@ -96,13 +96,15 @@ app.post('/api/login', async (req, res) => {
 });
 
 // MIDDLEWARE: We will use this in the next step to protect the "Mark as Applied" route
+// MIDDLEWARE: We will use this in the next step to protect the "Mark as Applied" route
 const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1]; // Format: "Bearer <token>"
 
     if (!token) return res.status(401).json({ error: 'Access denied. No token provided.' });
 
-    jwt.verify(token, JWT_SECRET, (err, user) => {
+    // Explicitly using process.env here prevents the ReferenceError crash
+    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
         if (err) return res.status(403).json({ error: 'Invalid token.' });
         req.user = user; // Attach the user ID to the request
         next();
